@@ -133,3 +133,13 @@ mysql:
   persistence:
     enabled: false
     size: 8Gi
+
+# External secret configuration for overriding environment variables
+externalSecret:
+  ncDb:
+    # Set to true to override NC_DB with value from external secret
+    enabled: false
+    # Name of the external secret containing the NC_DB value
+    secretName: "nocodb-external-secrets"
+    # Key within the secret containing the NC_DB value (should be base64 encoded)
+    secretKey: "NC_DB"

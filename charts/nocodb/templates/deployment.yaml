@@ -38,11 +38,21 @@ spec:
             - name: {{ include "nocodb.fullname" . }}
               mountPath: /usr/app/data
           {{- end }}
+          env:
+            {{- if .Values.externalSecret.ncDb.enabled }}
+            - name: NC_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalSecret.ncDb.secretName }}
+                  key: {{ .Values.externalSecret.ncDb.secretKey }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "nocodb.fullname" . }}
+            {{- if .Values.extraSecretEnvs }}
             - secretRef:
                 name: {{ include "nocodb.fullname" . }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080
