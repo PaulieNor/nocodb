@@ -1,10 +1,33 @@
 <script lang="ts" setup>
-import { type FormBuilderElement, type IntegrationType } from 'nocodb-sdk'
+import { type FormBuilderElement, type FormBuilderResponsiveSpan, type IntegrationType, ncIsArray } from 'nocodb-sdk'
 import { FORM_BUILDER_NON_CATEGORIZED, FormBuilderInputType, iconMap } from '#imports'
 
 const emit = defineEmits(['change'])
 
 const workflowContext = inject(WorkflowVariableInj, null)
+
+const { activeBreakpoint } = useGlobal()
+
+/**
+ * Resolve a field's span value for the current breakpoint.
+ * - number → used as-is
+ * - [sm, md?, lg?] → picks by breakpoint index, inheriting from smaller if omitted
+ */
+const resolveSpan = (span: number | FormBuilderResponsiveSpan | undefined): number => {
+  if (!span) return 24
+  if (!ncIsArray(span)) return span as number
+
+  const bp = activeBreakpoint.value
+  // [0] = sm (mobile), [1] = md (tablet), [2] = lg (desktop)
+  if (bp === 'xs' || bp === 'sm') {
+    return span[0] ?? 24
+  }
+  if (bp === 'md') {
+    return span[1] ?? span[0] ?? 24
+  }
+  // lg and above
+  return span[2] ?? span[1] ?? span[0] ?? 24
+}
 
 const {
   form,
@@ -178,6 +201,32 @@ const handleSelectChange = (field: FormBuilderElement, value: any) => {
   }
 }
 
+const searchDebounceMap = new Map<string, ReturnType<typeof useDebounceFn>>()
+
+const getSelectSearchHandler = (field: FormBuilderElement) => {
+  if (!field.searchable || !field.model) return undefined
+
+  if (!searchDebounceMap.has(field.model)) {
+    searchDebounceMap.set(
+      field.model,
+      useDebounceFn(async (query: string) => {
+        await loadOptions(field, query)
+      }, 300),
+    )
+  }
+
+  return (query: string) => {
+    searchDebounceMap.get(field.model)?.(query)
+  }
+}
+
+const getSelectFilterOption = (field: FormBuilderElement) => {
+  if (field.searchable) {
+    return false // Disable client-side filtering when using server-side search
+  }
+  return undefined // Use default client-side filtering
+}
+
 eventBus.on(integegrationEventHandler)
 
 onBeforeUnmount(() => {
@@ -185,10 +234,10 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  () => unref(formSchema),
-  async () => {
+  haveIntegrationInput,
+  async (hasIntegration) => {
     // if integration field is available, load the integration state
-    if (haveIntegrationInput.value) {
+    if (hasIntegration) {
       await loadIntegrations()
     }
   },
@@ -210,8 +259,9 @@ watch(
             >
               <template v-if="field.type === FormBuilderInputType.Space">
                 <div
+                  v-if="resolveSpan(field.span) > 0"
                   :style="{
-                    gridColumn: `span ${field.span || 24}`,
+                    gridColumn: `span ${resolveSpan(field.span)}`,
                   }"
                 ></div>
               </template>
@@ -254,14 +304,15 @@ watch(
                 <!-- Regular form field -->
                 <a-form-item
                   v-if="
-                    !field.group ||
-                    !isGroupCollapsibleInCategory(category, field.group) ||
-                    !isGroupCollapsed(`${category}-${field.group}`, getGroupDefaultCollapsed(category, field.group))
+                    resolveSpan(field.span) > 0 &&
+                    (!field.group ||
+                      !isGroupCollapsibleInCategory(category, field.group) ||
+                      !isGroupCollapsed(`${category}-${field.group}`, getGroupDefaultCollapsed(category, field.group)))
                   "
                   v-bind="validateInfos[field.model]"
                   class="nc-form-item"
                   :style="{
-                    gridColumn: `span ${field.span || 24}`,
+                    gridColumn: `span ${resolveSpan(field.span)}`,
                   }"
                   :required="false"
                   :data-testid="`nc-form-input-${field.model}`"
@@ -364,14 +415,16 @@ watch(
                         show-search
                         :placeholder="field.placeholder"
                         :loading="field.fetchOptionsKey && getIsLoadingFieldOptions(field.model)"
+                        :filter-option="getSelectFilterOption(field)"
                         @update:value="handleSelectChange(field, $event)"
+                        @search="getSelectSearchHandler(field)?.($event)"
                       >
                         <a-select-option
                           v-for="option in field.fetchOptionsKey ? getFieldOptions(field.model) : field.options"
                           :key="option.value"
                           :value="option.value"
                         >
-                          <div class="w-full flex gap-2 items-center" :data-testid="option.value">
+                          <div class="w-full h-full flex gap-2 items-center" :data-testid="option.value">
                             <GeneralIcon v-if="option.icon" :icon="option.icon" class="flex-none h-4 w-4" />
                             <NcTooltip class="flex-1 truncate min-w-0" show-on-truncate-only>
                               <template #title>
@@ -437,7 +490,7 @@ watch(
                         :key="integration.id"
                         :value="integration.id"
                       >
-                        <div class="w-full flex gap-2 items-center" :data-testid="integration.title">
+                        <div class="w-full h-full flex gap-2 items-center" :data-testid="integration.title">
                           <GeneralIntegrationIcon v-if="integration?.sub_type" :type="integration.sub_type" />
                           <NcTooltip class="flex-1 truncate" show-on-truncate-only>
                             <template #title>
@@ -547,15 +600,31 @@ watch(
                       @update:model-value="setFormStateWithEmit(field.model, $event)"
                     />
                   </template>
-                  <template v-else-if="field.type === FormBuilderInputType.FieldMapping">
+                  <template v-else-if="field.type === FormBuilderInputType.KeyValue">
+                    <NcFormBuilderInputKeyValue
+                      :model-value="deepReference(field.model)"
+                      :element="field"
+                      :disabled="disabled"
+                      @update:model-value="setFormStateWithEmit(field.model, $event)"
+                    />
+                  </template>
+                  <template v-else-if="field.type === FormBuilderInputType.EntitySelector">
                     <NcFormBuilderInputMountedWrapper @mounted="loadOptions(field)">
-                      <NcFormBuilderInputFieldMapping
+                      <NcFormBuilderInputEntitySelector
                         :model-value="deepReference(field.model)"
                         :element="field"
                         :disabled="disabled"
                         @update:model-value="setFormStateWithEmit(field.model, $event)"
                       />
                     </NcFormBuilderInputMountedWrapper>
+                  </template>
+                  <template v-else-if="field.type === FormBuilderInputType.ConditionBuilder">
+                    <NcFormBuilderInputConditionBuilder
+                      :model-value="deepReference(field.model)"
+                      :element="field"
+                      :disabled="disabled"
+                      @update:model-value="setFormStateWithEmit(field.model, $event)"
+                    />
                   </template>
                   <div
                     v-if="field.helpText && field.type !== FormBuilderInputType.Switch && !field.showHintAsTooltip"

@@ -1,4 +1,9 @@
-import { RelationTypes, UITypes } from 'nocodb-sdk';
+import {
+  isBtLikeV2Junction,
+  isMMOrMMLike,
+  RelationTypes,
+  UITypes,
+} from 'nocodb-sdk';
 import type { Knex } from 'knex';
 import type { IBaseModelSqlV2 } from '~/db/IBaseModelSqlV2';
 import type { QueryWithCte } from '~/helpers/dbHelpers';
@@ -26,11 +31,15 @@ export async function getDisplayValueOfRefTable(
   context: NcContext,
   relationCol: Column<LinkToAnotherRecordColumn | LinksColumn>,
 ) {
-  return await relationCol
-    .getColOptions(context)
-    .then((colOpt) => colOpt.getRelatedTable(context))
-    .then((model) => model.getColumns(context))
-    .then((cols) => cols.find((col) => col.pv) || cols[0]);
+  // Use the column's own base_id for getColOptions since the relation metadata
+  // is stored in the column's base, not the related table's base (cross-base links)
+  const colOpt = await relationCol.getColOptions<
+    LinkToAnotherRecordColumn | LinksColumn
+  >({ ...context, base_id: relationCol.base_id });
+  const model = await colOpt.getRelatedTable(context);
+  const modelContext = { ...context, base_id: model.base_id };
+  const cols = await model.getColumns(modelContext);
+  return cols.find((col) => col.pv) || cols[0];
 }
 
 // this function will generate the query for lookup column
@@ -69,7 +78,10 @@ export default async function generateLookupSelectQuery({
 
     if (column.uidt === UITypes.Lookup) {
       lookupColOpt = await column.getColOptions<LookupColumn>(context);
-    } else if (column.uidt !== UITypes.LinkToAnotherRecord) {
+    } else if (
+      column.uidt !== UITypes.LinkToAnotherRecord &&
+      column.uidt !== UITypes.Links
+    ) {
       NcError.get(context).badRequest('Invalid field type');
     }
 
@@ -81,6 +93,8 @@ export default async function generateLookupSelectQuery({
         : column;
       const relation =
         await relationCol.getColOptions<LinkToAnotherRecordColumn>(context);
+
+      const isMMLike = isMMOrMMLike(relationCol);
 
       const {
         parentContext,
@@ -98,7 +112,7 @@ export default async function generateLookupSelectQuery({
           : RelationTypes.HAS_MANY;
       }
 
-      if (relationType === RelationTypes.BELONGS_TO) {
+      if (relationType === RelationTypes.BELONGS_TO && !isMMLike) {
         const childColumn = await relation.getChildColumn(context);
         const parentColumn = await relation.getParentColumn(context);
         const childModel = await childColumn.getModel(childContext);
@@ -129,7 +143,7 @@ export default async function generateLookupSelectQuery({
             }`,
           ]),
         );
-      } else if (relationType === RelationTypes.HAS_MANY) {
+      } else if (relationType === RelationTypes.HAS_MANY && !isMMLike) {
         isBtLookup = false;
         const childColumn = await relation.getChildColumn(context);
         const parentColumn = await relation.getParentColumn(context);
@@ -161,8 +175,11 @@ export default async function generateLookupSelectQuery({
             }.${parentColumn.column_name}`,
           ]),
         );
-      } else if (relationType === RelationTypes.MANY_TO_MANY) {
-        isBtLookup = false;
+      } else if (relationType === RelationTypes.MANY_TO_MANY || isMMLike) {
+        const isSingleTargetV2 = isBtLikeV2Junction(relationCol);
+        if (!isSingleTargetV2) {
+          isBtLookup = false;
+        }
         const childColumn = await relation.getChildColumn(context);
         const parentColumn = await relation.getParentColumn(context);
         const childModel = await childColumn.getModel(childContext);
@@ -214,6 +231,10 @@ export default async function generateLookupSelectQuery({
               }.${childColumn.column_name}`,
             ),
           );
+
+        if (isSingleTargetV2) {
+          selectQb.limit(1);
+        }
       }
     }
     let lookupColumn = lookupColOpt
@@ -222,8 +243,12 @@ export default async function generateLookupSelectQuery({
 
     // if lookup column is qr code or barcode extract the referencing column
     if ([UITypes.QrCode, UITypes.Barcode].includes(lookupColumn.uidt)) {
+      // For cross-base lookups, lookupColumn might belong to a different base than context
+      const lookupColContext = lookupColumn.base_id
+        ? { ...context, base_id: lookupColumn.base_id }
+        : context;
       lookupColumn = await lookupColumn
-        .getColOptions<BarcodeColumn | QrCodeColumn>(context)
+        .getColOptions<BarcodeColumn | QrCodeColumn>(lookupColContext)
         .then((barcode) => barcode.getValueColumn(refContext));
     }
     {
@@ -250,7 +275,9 @@ export default async function generateLookupSelectQuery({
         const relation =
           await relationCol.getColOptions<LinkToAnotherRecordColumn>(context);
 
-        let relationType = relation.type;
+        let relationType = isMMOrMMLike(relationCol)
+          ? RelationTypes.MANY_TO_MANY
+          : relation.type;
 
         if (relationType === RelationTypes.ONE_TO_ONE) {
           relationType = relationCol.meta?.bt
@@ -260,7 +287,7 @@ export default async function generateLookupSelectQuery({
         const {
           parentContext,
           childContext,
-          refContext: _refContext,
+          refContext: nestedRefContext,
           mmContext,
         } = await relation.getParentChildContext(context, relationCol);
 
@@ -308,7 +335,10 @@ export default async function generateLookupSelectQuery({
             `${prevAlias}.${parentColumn.column_name}`,
           );
         } else if (relationType === RelationTypes.MANY_TO_MANY) {
-          isBtLookup = false;
+          const nestedIsSingleTargetV2 = isBtLikeV2Junction(relationCol);
+          if (!nestedIsSingleTargetV2) {
+            isBtLookup = false;
+          }
           const childColumn = await relation.getChildColumn(context);
           const parentColumn = await relation.getParentColumn(context);
           const childModel = await childColumn.getModel(childContext);
@@ -362,17 +392,23 @@ export default async function generateLookupSelectQuery({
                 }`,
               ),
             );
+
+          if (nestedIsSingleTargetV2) {
+            selectQb.limit(1);
+          }
         }
 
         if (lookupColumn.uidt === UITypes.Lookup)
-          lookupColumn = await nestedLookupColOpt.getLookupColumn(refContext);
+          lookupColumn = await nestedLookupColOpt.getLookupColumn(
+            nestedRefContext,
+          );
         else
           lookupColumn = await getDisplayValueOfRefTable(
-            refContext,
+            nestedRefContext,
             relationCol,
           );
         prevAlias = nestedAlias;
-        context = _refContext;
+        context = nestedRefContext;
       }
 
       {

@@ -32,9 +32,7 @@ export enum JobTypes {
   MetaDiff = 'meta-diff',
   SourceCreate = 'source-create',
   SourceDelete = 'source-delete',
-  UpdateModelStat = 'update-model-stat',
   UpdateWsStat = 'update-ws-stats',
-  UpdateSrcStat = 'update-source-stat',
   HealthCheck = 'health-check',
   HandleWebhook = 'handle-webhook',
   CleanUp = 'clean-up',
@@ -62,6 +60,11 @@ export enum JobTypes {
   ResumeWorkflow = 'resume-workflow',
   TestWorkflowNode = 'test-workflow-node',
   HeartbeatWorkflow = 'heartbeat-workflow',
+  PollWorkflow = 'poll-workflow',
+  WorkflowErrorNotification = 'workflow-error-notification',
+  HookErrorNotification = 'hook-error-notification',
+  ChatMessage = 'chat-message',
+  ChatApproval = 'chat-approval',
 }
 
 export const SKIP_STORING_JOB_META = [
@@ -71,9 +74,7 @@ export const SKIP_STORING_JOB_META = [
   JobTypes.HandleWebhook,
   JobTypes.ExecuteWorkflow,
   JobTypes.InitMigrationJobs,
-  JobTypes.UpdateModelStat,
   JobTypes.UpdateWsStat,
-  JobTypes.UpdateSrcStat,
   JobTypes.UpdateUsageStats,
   JobTypes.SyncModuleSchedule,
   JobTypes.ReseatSubscription,
@@ -81,6 +82,11 @@ export const SKIP_STORING_JOB_META = [
   JobTypes.WorkflowResumeSchedule,
   JobTypes.ResumeWorkflow,
   JobTypes.HeartbeatWorkflow,
+  JobTypes.PollWorkflow,
+  JobTypes.WorkflowErrorNotification,
+  JobTypes.HookErrorNotification,
+  JobTypes.ChatMessage,
+  JobTypes.ChatApproval,
 ];
 
 export enum JobStatus {
@@ -120,6 +126,8 @@ export enum InstanceCommands {
   RELEASE = 'release',
   ASSIGN_WORKER_GROUP = 'assignWorkerGroup',
   STOP_OTHER_WORKER_GROUPS = 'stopOtherWorkerGroups',
+  ABORT_CHAT_STREAM = 'abortChatStream',
+  ABORT_CHAT_STREAM_ACK = 'abortChatStreamAck',
 }
 
 export interface JobData {
@@ -226,7 +234,7 @@ export interface DataExportJobData extends JobData {
   };
   modelId: string;
   viewId: string;
-  exportAs: 'csv' | 'json' | 'xlsx';
+  exportAs: 'csv' | 'json' | 'excel';
   ncSiteUrl: string;
 }
 
@@ -299,4 +307,24 @@ export interface TestWorkflowNodeJobData extends JobData {
 
 export interface HeartbeatWorkflowJobData extends JobData {
   workflowId: string;
+}
+
+export interface PollWorkflowJobData extends JobData {
+  workflowId: string;
+  triggerNodeId: string;
+  activationState: Record<string, any>;
+}
+
+export interface ChatMessageJobData extends JobData {
+  sessionId: string;
+  firstUserMessage?: string;
+  approvals?: Record<string, 'approved' | 'denied'>;
+  baseId?: string;
+}
+
+export interface ChatApprovalJobData extends JobData {
+  sessionId: string;
+  messageId: string;
+  decisions: Record<string, 'approved' | 'denied'>;
+  baseId?: string;
 }
